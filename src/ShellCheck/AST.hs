@@ -17,9 +17,11 @@
     You should have received a copy of the GNU General Public License
     along with this program.  If not, see <https://www.gnu.org/licenses/>.
 -}
-{-# LANGUAGE DeriveGeneric, DeriveAnyClass #-}
+{-# LANGUAGE DeriveGeneric, DeriveAnyClass, DeriveTraversable, TemplateHaskell, TypeFamilies #-}
 module ShellCheck.AST where
 
+import Data.Functor.Foldable
+import Data.Functor.Foldable.TH
 import GHC.Generics (Generic)
 import Control.Monad.Identity
 import Control.DeepSeq
@@ -151,6 +153,8 @@ data Annotation =
     deriving (Show, Eq)
 data ConditionType = DoubleBracket | SingleBracket deriving (Show, Eq)
 
+makeBaseFunctor ''Token
+
 -- This is an abomination.
 tokenEquals :: Token -> Token -> Bool
 tokenEquals a b = kludge a == kludge b
@@ -165,126 +169,9 @@ analyze f g i =
   where
     round t = do
         f t
-        newT <- delve t
+        newT <- fmap embed . traverse round . project $ t
         g t
         i newT
-    roundAll = mapM round
-
-    dl l v = do
-        x <- roundAll l
-        return $ v x
-    dll l m v = do
-        x <- roundAll l
-        y <- roundAll m
-        return $ v x y
-    d1 t v = do
-        x <- round t
-        return $ v x
-    d2 t1 t2 v = do
-        x <- round t1
-        y <- round t2
-        return $ v x y
-
-    delve (T_NormalWord id list) = dl list $ T_NormalWord id
-    delve (T_DoubleQuoted id list) = dl list $ T_DoubleQuoted id
-    delve (T_DollarDoubleQuoted id list) = dl list $ T_DollarDoubleQuoted id
-    delve (T_DollarExpansion id list) = dl list $ T_DollarExpansion id
-    delve (T_DollarBraceCommandExpansion id list) = dl list $ T_DollarBraceCommandExpansion id
-    delve (T_BraceExpansion id list) = dl list $ T_BraceExpansion id
-    delve (T_Backticked id list) = dl list $ T_Backticked id
-    delve (T_DollarArithmetic id c) = d1 c $ T_DollarArithmetic id
-    delve (T_DollarBracket id c) = d1 c $ T_DollarBracket id
-    delve (T_IoFile id op file) = d2 op file $ T_IoFile id
-    delve (T_IoDuplicate id op num) = d1 op $ \x -> T_IoDuplicate id x num
-    delve (T_HereString id word) = d1 word $ T_HereString id
-    delve (T_FdRedirect id v t) = d1 t $ T_FdRedirect id v
-    delve (T_Assignment id mode var indices value) = do
-        a <- roundAll indices
-        b <- round value
-        return $ T_Assignment id mode var a b
-    delve (T_Array id t) = dl t $ T_Array id
-    delve (T_IndexedElement id indices t) = do
-        a <- roundAll indices
-        b <- round t
-        return $ T_IndexedElement id a b
-    delve (T_Redirecting id redirs cmd) = do
-        a <- roundAll redirs
-        b <- round cmd
-        return $ T_Redirecting id a b
-    delve (T_SimpleCommand id vars cmds) = dll vars cmds $ T_SimpleCommand id
-    delve (T_Pipeline id l1 l2) = dll l1 l2 $ T_Pipeline id
-    delve (T_Banged id l) = d1 l $ T_Banged id
-    delve (T_AndIf id t u) = d2 t u $ T_AndIf id
-    delve (T_OrIf id t u) = d2 t u $ T_OrIf id
-    delve (T_Backgrounded id l) = d1 l $ T_Backgrounded id
-    delve (T_Subshell id l) = dl l $ T_Subshell id
-    delve (T_ProcSub id typ l) = dl l $ T_ProcSub id typ
-    delve (T_Arithmetic id c) = d1 c $ T_Arithmetic id
-    delve (T_IfExpression id conditions elses) = do
-        newConds <- mapM (\(c, t) -> do
-                            x <- mapM round c
-                            y <- mapM round t
-                            return (x,y)
-                    ) conditions
-        newElses <- roundAll elses
-        return $ T_IfExpression id newConds newElses
-    delve (T_BraceGroup id l) = dl l $ T_BraceGroup id
-    delve (T_WhileExpression id c l) = dll c l $ T_WhileExpression id
-    delve (T_UntilExpression id c l) = dll c l $ T_UntilExpression id
-    delve (T_ForIn id v w l) = dll w l $ T_ForIn id v
-    delve (T_SelectIn id v w l) = dll w l $ T_SelectIn id v
-    delve (T_CaseExpression id word cases) = do
-        newWord <- round word
-        newCases <- mapM (\(o, c, t) -> do
-                            x <- mapM round c
-                            y <- mapM round t
-                            return (o, x,y)
-                        ) cases
-        return $ T_CaseExpression id newWord newCases
-
-    delve (T_ForArithmetic id a b c group) = do
-        x <- round a
-        y <- round b
-        z <- round c
-        list <- mapM round group
-        return $ T_ForArithmetic id x y z list
-
-    delve (T_Script id shebang list) = do
-        newShebang <- round shebang
-        newList <- roundAll list
-        return $ T_Script id newShebang newList
-
-    delve (T_Function id a b name body) = d1 body $ T_Function id a b name
-    delve (T_Condition id typ token) = d1 token $ T_Condition id typ
-    delve (T_Extglob id str l) = dl l $ T_Extglob id str
-    delve (T_DollarBraced id braced op) = d1 op $ T_DollarBraced id braced
-    delve (T_HereDoc id d q str l) = dl l $ T_HereDoc id d q str
-
-    delve (TC_And id typ str t1 t2) = d2 t1 t2 $ TC_And id typ str
-    delve (TC_Or id typ str t1 t2) = d2 t1 t2 $ TC_Or id typ str
-    delve (TC_Group id typ token) = d1 token $ TC_Group id typ
-    delve (TC_Binary id typ op lhs rhs) = d2 lhs rhs $ TC_Binary id typ op
-    delve (TC_Unary id typ op token) = d1 token $ TC_Unary id typ op
-    delve (TC_Nullary id typ token) = d1 token $ TC_Nullary id typ
-
-    delve (TA_Binary id op t1 t2) = d2 t1 t2 $ TA_Binary id op
-    delve (TA_Assignment id op t1 t2) = d2 t1 t2 $ TA_Assignment id op
-    delve (TA_Unary id op t1) = d1 t1 $ TA_Unary id op
-    delve (TA_Sequence id l) = dl l $ TA_Sequence id
-    delve (TA_Trinary id t1 t2 t3) = do
-        a <- round t1
-        b <- round t2
-        c <- round t3
-        return $ TA_Trinary id a b c
-    delve (TA_Expansion id t) = dl t $ TA_Expansion id
-    delve (TA_Variable id str t) = dl t $ TA_Variable id str
-    delve (T_Annotation id anns t) = d1 t $ T_Annotation id anns
-    delve (T_CoProc id var body) = d1 body $ T_CoProc id var
-    delve (T_CoProcBody id t) = d1 t $ T_CoProcBody id
-    delve (T_Include id script) = d1 script $ T_Include id
-    delve (T_SourceCommand id includer t_include) = d2 includer t_include $ T_SourceCommand id
-    delve (T_BatsTest id name t) = d2 name t $ T_BatsTest id
-    delve t = return t
 
 getId :: Token -> Id
 getId t = case t of
